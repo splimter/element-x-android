@@ -8,7 +8,9 @@
 
 package io.element.android.appnav.room.joined
 
+import android.app.Activity
 import android.os.Parcelable
+import androidx.activity.compose.LocalActivity
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
@@ -45,6 +47,11 @@ import io.element.android.libraries.matrix.api.core.ThreadId
 import io.element.android.libraries.matrix.api.core.UserId
 import io.element.android.libraries.matrix.api.permalink.PermalinkData
 import io.element.android.libraries.matrix.api.room.JoinedRoom
+import io.element.android.services.analytics.api.AnalyticsLongRunningTransaction.LoadJoinedRoomFlow
+import io.element.android.services.analytics.api.AnalyticsLongRunningTransaction.LoadMessagesUi
+import io.element.android.services.analytics.api.AnalyticsLongRunningTransaction.OpenRoom
+import io.element.android.services.analytics.api.AnalyticsService
+import io.element.android.services.analytics.api.finishLongRunningTransaction
 import io.element.android.services.appnavstate.api.ActiveRoomsHolder
 import io.element.android.services.appnavstate.api.AppNavigationStateService
 import kotlinx.coroutines.CoroutineScope
@@ -66,6 +73,7 @@ class JoinedRoomLoadedFlowNode(
     private val sessionCoroutineScope: CoroutineScope,
     private val matrixClient: MatrixClient,
     private val activeRoomsHolder: ActiveRoomsHolder,
+    private val analyticsService: AnalyticsService,
     roomGraphFactory: RoomGraphFactory,
 ) : BaseFlowNode<JoinedRoomLoadedFlowNode.NavTarget>(
     backstack = BackStack(
@@ -90,9 +98,14 @@ class JoinedRoomLoadedFlowNode(
     private val callback: Callback = callback()
     override val graph = roomGraphFactory.create(inputs.room)
 
+    // This is an ugly hack to check activity recreation
+    private var currentActivity: Activity? = null
+
     init {
         lifecycle.subscribe(
             onCreate = {
+                val parent = analyticsService.getLongRunningTransaction(OpenRoom)
+                analyticsService.startLongRunningTransaction(LoadMessagesUi, parent)
                 Timber.v("OnCreate => ${inputs.room.roomId}")
                 appNavigationStateService.onNavigateToRoom(id, inputs.room.roomId)
                 activeRoomsHolder.addRoom(inputs.room)
@@ -100,14 +113,19 @@ class JoinedRoomLoadedFlowNode(
                 trackVisitedRoom()
             },
             onResume = {
+                analyticsService.finishLongRunningTransaction(LoadJoinedRoomFlow)
                 sessionCoroutineScope.launch {
                     inputs.room.subscribeToSync()
                 }
             },
             onDestroy = {
                 Timber.v("OnDestroy")
-                activeRoomsHolder.removeRoom(inputs.room.sessionId, inputs.room.roomId)
-                inputs.room.destroy()
+                // If we're just going through an activity recreation there's no need to destroy the Room object
+                // Destroying it would actually cause an issue where its methods can no longer be called
+                if (currentActivity?.isChangingConfigurations != true) {
+                    activeRoomsHolder.removeRoom(inputs.room.sessionId, inputs.room.roomId)
+                    inputs.room.destroy()
+                }
                 appNavigationStateService.onLeavingRoom(id)
             }
         )
@@ -280,6 +298,8 @@ class JoinedRoomLoadedFlowNode(
 
     @Composable
     override fun View(modifier: Modifier) {
+        currentActivity = LocalActivity.current
+
         BackstackView()
     }
 }
